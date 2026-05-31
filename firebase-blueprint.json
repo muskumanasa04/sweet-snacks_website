@@ -1,0 +1,187 @@
+{
+  "entities": {
+    "Suite": {
+      "title": "Suite",
+      "description": "Represents sweet and snack food products listed by chefs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique ID of the sweet product" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "location": { "type": "string" },
+        "pricePerNight": { "type": "number" },
+        "unitWeight": { "type": "string" },
+        "rating": { "type": "number" },
+        "capacity": { "type": "number" },
+        "category": { "type": "string", "enum": ["Traditional Sweets", "Crunchy Snacks", "Festive Hampers", "Healthy & Sugar-Free"] },
+        "amenities": { "type": "array" },
+        "images": { "type": "array" },
+        "ownerEmail": { "type": "string" },
+        "status": { "type": "string", "enum": ["approved", "pending", "rejected"] },
+        "reviewsCount": { "type": "number" }
+      },
+      "required": ["id", "title", "pricePerNight", "category", "ownerEmail", "status"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Product reviews submitted by customers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "suiteId": { "type": "string" },
+        "sweetTitle": { "type": "string" },
+        "userName": { "type": "string" },
+        "rating": { "type": "number" },
+        "comment": { "type": "string" },
+        "date": { "type": "string" },
+        "avatar": { "type": "string" }
+      },
+      "required": ["id", "suiteId", "userName", "rating", "comment"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Represents sweets purchases and custom orders.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "suiteId": { "type": "string" },
+        "suiteTitle": { "type": "string" },
+        "suiteImage": { "type": "string" },
+        "guestName": { "type": "string" },
+        "guestEmail": { "type": "string" },
+        "checkIn": { "type": "string" },
+        "checkOut": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "guestsCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "cancelled", "completed"] },
+        "paymentStatus": { "type": "string", "enum": ["paid", "unpaid"] },
+        "createdAt": { "type": "string" },
+        "deliveryAddress": { "type": "string" },
+        "deliveryPhone": { "type": "string" }
+      },
+      "required": ["id", "suiteId", "guestEmail", "totalAmount", "guestsCount", "status", "paymentStatus"]
+    },
+    "ChefContactRequest": {
+      "title": "ChefContactRequest",
+      "description": "Direct message inquiry requests sent to chefs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sweetId": { "type": "string" },
+        "sweetTitle": { "type": "string" },
+        "chefEmail": { "type": "string" },
+        "buyerEmail": { "type": "string" },
+        "buyerName": { "type": "string" },
+        "buyerPhone": { "type": "string" },
+        "message": { "type": "string" },
+        "whatsappNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "replied_whatsapp", "replied_mail"] },
+        "replyMessage": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "sweetId", "chefEmail", "buyerEmail", "message", "status"]
+    },
+    "ChefOnboarding": {
+      "title": "ChefOnboarding",
+      "description": "Verified chef register criteria information.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "chefName": { "type": "string" },
+        "experienceYears": { "type": "number" },
+        "kitchenLicense": { "type": "string" },
+        "whatsappNumber": { "type": "string" },
+        "specialtyDescription": { "type": "string" },
+        "verified": { "type": "boolean" }
+      },
+      "required": ["email", "chefName", "kitchenLicense", "verified"]
+    },
+    "ContactSchedule": {
+      "title": "ContactSchedule",
+      "description": "Bulk or custom catering consultation slots booked of admins.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "date": { "type": "string" },
+        "timeSlot": { "type": "string" },
+        "topic": { "type": "string" },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["scheduled", "completed"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "email", "date", "timeSlot", "topic", "status"]
+    },
+    "SystemNotification": {
+      "title": "SystemNotification",
+      "description": "Alert signals for users, owners and admin channels.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "recipientEmail": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "date": { "type": "string" },
+        "read": { "type": "boolean" },
+        "type": { "type": "string", "enum": ["booking", "property", "review", "system", "contact"] }
+      },
+      "required": ["id", "recipientEmail", "title", "message", "date", "read", "type"]
+    },
+    "UserIdentity": {
+      "title": "UserIdentity",
+      "description": "System accounts for client roles.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["guest", "owner", "admin"] },
+        "avatar": { "type": "string" },
+        "walletBalance": { "type": "number" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "favorites": { "type": "array" },
+        "password": { "type": "string" },
+        "isEmailVerified": { "type": "boolean" },
+        "verificationCode": { "type": "string" },
+        "resetToken": { "type": "string" }
+      },
+      "required": ["email", "name", "role"]
+    }
+  },
+  "firestore": {
+    "suites": {
+      "schema": "Suite",
+      "description": "Listings of sweet and savory foods."
+    },
+    "reviews": {
+      "schema": "Review",
+      "description": "Customer feedback on standard items."
+    },
+    "bookings": {
+      "schema": "Booking",
+      "description": "User purchases and culinary orders queued."
+    },
+    "contactRequests": {
+      "schema": "ChefContactRequest",
+      "description": "Inquiries, customized packing queries addressed to chefs."
+    },
+    "chefOnboardings": {
+      "schema": "ChefOnboarding",
+      "description": "Registrations of culinary creators."
+    },
+    "contactSchedules": {
+      "schema": "ContactSchedule",
+      "description": "Consultation orders booked with management."
+    },
+    "notifications": {
+      "schema": "SystemNotification",
+      "description": "Inbox logs for tracking order status, verifications and listings."
+    },
+    "users": {
+      "schema": "UserIdentity",
+      "description": "Profiles and virtual wallet accounts."
+    }
+  }
+}

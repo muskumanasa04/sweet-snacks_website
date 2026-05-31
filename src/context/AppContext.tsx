@@ -1,6 +1,65 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Suite, Review, Booking, ContactSchedule, SystemNotification, UserRole, UserIdentity, ChefContactRequest, ChefOnboarding } from '../types';
 import { INITIAL_SUITES, INITIAL_REVIEWS, INITIAL_BOOKINGS, INITIAL_CONTACTS, INITIAL_NOTIFICATIONS } from '../data/initialData';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDocs, 
+  onSnapshot, 
+  deleteDoc, 
+  writeBatch 
+} from 'firebase/firestore';
+import { signInAnonymously } from 'firebase/auth';
+import { db, auth } from '../firebase';
+
+// ABAC / Security Error Types
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error Triggered:', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 interface AppContextProps {
   suites: Suite[];
@@ -25,7 +84,6 @@ interface AppContextProps {
   clearAllNotifications: () => void;
   updateWallet: (amount: number) => void;
   
-  // Auth and Profile System
   registeredUsers: UserIdentity[];
   registerUser: (user: Omit<UserIdentity, 'walletBalance'>) => { success: boolean; requiresVerification: boolean; msg: string };
   loginUser: (email: string, role: UserRole, password?: string) => { success: boolean; requiresVerification?: boolean; msg: string };
@@ -34,24 +92,20 @@ interface AppContextProps {
   sendPasswordReset: (email: string, role: UserRole) => { success: boolean; code: string; msg: string };
   resetPasswordWithToken: (email: string, role: UserRole, token: string, newPassword: string) => { success: boolean; msg: string };
   
-  // Favorites system
   favorites: string[];
   toggleFavorite: (sweetId: string) => void;
   isFavorite: (sweetId: string) => boolean;
   
-  // Chef direct contact requests ("Contact Owner")
   contactRequests: ChefContactRequest[];
   chefContactRequests: ChefContactRequest[];
   addContactRequest: (req: Omit<ChefContactRequest, 'id' | 'createdAt' | 'status'>) => void;
   replyToContactRequest: (reqId: string, messageText: string, channel: 'whatsapp' | 'mail') => void;
   respondToContactRequest: (reqId: string, messageText: string, channel: 'WhatsApp' | 'Email') => void;
   
-  // Chef Onboarding and profile updates
   chefOnboardingDetails: ChefOnboarding | undefined;
   submitChefOnboarding: (details: Omit<ChefOnboarding, 'verified'>) => void;
   updateCurrentUserProfile: (profile: { name: string; phone?: string; address?: string }) => void;
 
-  // Chef onboarding & KYC registration details before upload of sweets
   chefOnboardings: ChefOnboarding[];
   upsertChefOnboarding: (onboarding: Omit<ChefOnboarding, 'verified'>) => void;
   verifyChef: (email: string) => void;
@@ -59,7 +113,7 @@ interface AppContextProps {
 
 const AppContext = createContext<AppContextProps | undefined>(undefined);
 
-// Initial list of registered accounts
+// Core Mock Accounts that we seed into Firestore if empty
 const DEFAULT_ACCOUNTS: UserIdentity[] = [
   {
     email: 'muskumanasa04@gmail.com',
@@ -105,7 +159,6 @@ const DEFAULT_ACCOUNTS: UserIdentity[] = [
   }
 ];
 
-// Initial Chef verification/onboardings
 const DEFAULT_ONBOARDINGS: ChefOnboarding[] = [
   {
     email: 'sweet.owner@sweetstay.com',
@@ -127,7 +180,6 @@ const DEFAULT_ONBOARDINGS: ChefOnboarding[] = [
   }
 ];
 
-// Initial Chef contact messages
 const DEFAULT_CONTACT_REQUESTS: ChefContactRequest[] = [
   {
     id: 'req-1',
@@ -145,133 +197,308 @@ const DEFAULT_CONTACT_REQUESTS: ChefContactRequest[] = [
 ];
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Config state
+  // Sync States with initial local representations before cloud Sync
   const [registeredUsers, setRegisteredUsers] = useState<UserIdentity[]>(() => {
-    const saved = localStorage.getItem('gourmet_accounts_v2');
-    return saved ? JSON.parse(saved) : DEFAULT_ACCOUNTS;
+    return DEFAULT_ACCOUNTS;
   });
 
   const [chefOnboardings, setChefOnboardings] = useState<ChefOnboarding[]>(() => {
-    const saved = localStorage.getItem('gourmet_chef_onboardings_v2');
-    return saved ? JSON.parse(saved) : DEFAULT_ONBOARDINGS;
+    return DEFAULT_ONBOARDINGS;
   });
 
   const [contactRequests, setContactRequests] = useState<ChefContactRequest[]>(() => {
-    const saved = localStorage.getItem('gourmet_contact_requests_v2');
-    return saved ? JSON.parse(saved) : DEFAULT_CONTACT_REQUESTS;
+    return DEFAULT_CONTACT_REQUESTS;
   });
 
   const [suites, setSuites] = useState<Suite[]>(() => {
-    const saved = localStorage.getItem('gourmet_suites_list_v2');
-    return saved ? JSON.parse(saved) : INITIAL_SUITES;
+    return INITIAL_SUITES;
   });
 
   const [reviews, setReviews] = useState<Review[]>(() => {
-    const saved = localStorage.getItem('gourmet_reviews_list_v2');
-    return saved ? JSON.parse(saved) : INITIAL_REVIEWS;
+    return INITIAL_REVIEWS;
   });
 
   const [bookings, setBookings] = useState<Booking[]>(() => {
-    const saved = localStorage.getItem('gourmet_bookings_list_v2');
-    return saved ? JSON.parse(saved) : INITIAL_BOOKINGS;
+    return INITIAL_BOOKINGS;
   });
 
   const [contacts, setContacts] = useState<ContactSchedule[]>(() => {
-    const saved = localStorage.getItem('gourmet_contacts_list_v2');
-    return saved ? JSON.parse(saved) : INITIAL_CONTACTS;
+    return INITIAL_CONTACTS;
   });
 
   const [notifications, setNotifications] = useState<SystemNotification[]>(() => {
-    const saved = localStorage.getItem('gourmet_notifications_list_v2');
-    return saved ? JSON.parse(saved) : INITIAL_NOTIFICATIONS;
+    return INITIAL_NOTIFICATIONS;
   });
 
   const [currentUser, setCurrentUser] = useState<UserIdentity>(() => {
-    const savedUser = localStorage.getItem('gourmet_logged_in_user_v2');
-    if (savedUser) {
-      return JSON.parse(savedUser);
-    }
-    return DEFAULT_ACCOUNTS[0]; // Kumari Manasa Guest default
+    return DEFAULT_ACCOUNTS[0]; // Kumari Manasa default
   });
 
-  const [currentRole, setCurrentRole] = useState<UserRole>(() => {
-    const savedUser = localStorage.getItem('gourmet_logged_in_user_v2');
-    if (savedUser) {
-      return JSON.parse(savedUser).role;
+  const [currentRole, setCurrentRole] = useState<UserRole>('guest');
+
+  // Deep Cache-Bust Routine: purge any legacy real-estate local storage caches
+  useEffect(() => {
+    const legacyKeys = [
+      'sweet_suites_list',
+      'sweet_accounts',
+      'sweet_chef_onboardings',
+      'sweet_contact_requests',
+      'sweet_reviews_list',
+      'sweet_bookings_list',
+      'sweet_contacts_list',
+      'sweet_notifications_list',
+      'sweet_logged_in_user',
+      'gourmet_suites_list_v2',
+      'gourmet_accounts_v2',
+      'gourmet_chef_onboardings_v2',
+      'gourmet_contact_requests_v2',
+      'gourmet_reviews_list_v2',
+      'gourmet_bookings_list_v2',
+      'gourmet_contacts_list_v2',
+      'gourmet_notifications_list_v2',
+      'gourmet_logged_in_user_v2'
+    ];
+
+    let foundLegacy = false;
+    legacyKeys.forEach(k => {
+      const val = localStorage.getItem(k);
+      if (val) {
+        if (
+          val.toLowerCase().includes('villa') || 
+          val.toLowerCase().includes('cottage') || 
+          val.includes('photo-1544256718') || 
+          val.includes('photo-1587314168485')
+        ) {
+          foundLegacy = true;
+        }
+        localStorage.removeItem(k);
+      }
+    });
+
+    if (foundLegacy) {
+      console.log("Busting cached real estate files and reloading sweets and snacks fresh.");
+      localStorage.clear();
+      window.location.reload();
     }
-    return 'guest';
-  });
+  }, []);
 
-  // Keep Local Storage synced
-  useEffect(() => {
-    localStorage.setItem('gourmet_accounts_v2', JSON.stringify(registeredUsers));
-  }, [registeredUsers]);
+  // Seeding Database dynamically if 100% empty
+  const seedFirestoreIfEmpty = async () => {
+    try {
+      const suitesSnap = await getDocs(collection(db, 'suites'));
+      if (suitesSnap.empty) {
+        console.log("Seeding sweets products collection to Firestore...");
+        const batch = writeBatch(db);
+        INITIAL_SUITES.forEach(s => {
+          const docRef = doc(collection(db, 'suites'), s.id);
+          batch.set(docRef, s);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_chef_onboardings_v2', JSON.stringify(chefOnboardings));
-  }, [chefOnboardings]);
+      const reviewsSnap = await getDocs(collection(db, 'reviews'));
+      if (reviewsSnap.empty) {
+        const batch = writeBatch(db);
+        INITIAL_REVIEWS.forEach(r => {
+          const docRef = doc(collection(db, 'reviews'), r.id);
+          batch.set(docRef, r);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_contact_requests_v2', JSON.stringify(contactRequests));
-  }, [contactRequests]);
+      const bookingsSnap = await getDocs(collection(db, 'bookings'));
+      if (bookingsSnap.empty) {
+        const batch = writeBatch(db);
+        INITIAL_BOOKINGS.forEach(b => {
+          const docRef = doc(collection(db, 'bookings'), b.id);
+          batch.set(docRef, b);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_suites_list_v2', JSON.stringify(suites));
-  }, [suites]);
+      const contactsSnap = await getDocs(collection(db, 'contactSchedules'));
+      if (contactsSnap.empty) {
+        const batch = writeBatch(db);
+        INITIAL_CONTACTS.forEach(c => {
+          const docRef = doc(collection(db, 'contactSchedules'), c.id);
+          batch.set(docRef, c);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_reviews_list_v2', JSON.stringify(reviews));
-  }, [reviews]);
+      const requestsSnap = await getDocs(collection(db, 'contactRequests'));
+      if (requestsSnap.empty) {
+        const batch = writeBatch(db);
+        DEFAULT_CONTACT_REQUESTS.forEach(req => {
+          const docRef = doc(collection(db, 'contactRequests'), req.id);
+          batch.set(docRef, req);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_bookings_list_v2', JSON.stringify(bookings));
-  }, [bookings]);
+      const onboardingsSnap = await getDocs(collection(db, 'chefOnboardings'));
+      if (onboardingsSnap.empty) {
+        const batch = writeBatch(db);
+        DEFAULT_ONBOARDINGS.forEach(onb => {
+          const id = onb.email.replace(/[@.]/g, '_');
+          const docRef = doc(collection(db, 'chefOnboardings'), id);
+          batch.set(docRef, onb);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_contacts_list_v2', JSON.stringify(contacts));
-  }, [contacts]);
+      const usersSnap = await getDocs(collection(db, 'users'));
+      if (usersSnap.empty) {
+        const batch = writeBatch(db);
+        DEFAULT_ACCOUNTS.forEach(u => {
+          const id = u.email.replace(/[@.]/g, '_') + '_' + u.role;
+          const docRef = doc(collection(db, 'users'), id);
+          batch.set(docRef, u);
+        });
+        await batch.commit();
+      }
 
-  useEffect(() => {
-    localStorage.setItem('gourmet_notifications_list_v2', JSON.stringify(notifications));
-  }, [notifications]);
+      const notifSnap = await getDocs(collection(db, 'notifications'));
+      if (notifSnap.empty) {
+        const batch = writeBatch(db);
+        INITIAL_NOTIFICATIONS.forEach(n => {
+          const docRef = doc(collection(db, 'notifications'), n.id);
+          batch.set(docRef, n);
+        });
+        await batch.commit();
+      }
+    } catch (err) {
+      console.warn("Firestore seeding missed/skipped:", err);
+    }
+  };
 
+  // Synchronous authentications & Firestore real-time synchronization
   useEffect(() => {
-    localStorage.setItem('gourmet_logged_in_user_v2', JSON.stringify(currentUser));
+    // 1. Sign in anonymously if not logged in to Firebase yet
+    signInAnonymously(auth)
+      .then(() => {
+        console.log("Authenticated anonymously with Firebase Auth.");
+        return seedFirestoreIfEmpty();
+      })
+      .catch((e) => {
+        console.log("Firebase Auth automatic link skipped: ", e);
+      });
+
+    // 2. Realtime sync onSnapshot blocks
+    const unsubSuites = onSnapshot(collection(db, 'suites'), (snap) => {
+      const items: Suite[] = [];
+      snap.forEach(doc => items.push(doc.data() as Suite));
+      if (items.length > 0) {
+        setSuites(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen suite cache load");
+    });
+
+    const unsubReviews = onSnapshot(collection(db, 'reviews'), (snap) => {
+      const items: Review[] = [];
+      snap.forEach(doc => items.push(doc.data() as Review));
+      if (items.length > 0) {
+        setReviews(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen review cache load");
+    });
+
+    const unsubBookings = onSnapshot(collection(db, 'bookings'), (snap) => {
+      const items: Booking[] = [];
+      snap.forEach(doc => items.push(doc.data() as Booking));
+      if (items.length > 0) {
+        setBookings(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen booking cache load");
+    });
+
+    const unsubContactRequests = onSnapshot(collection(db, 'contactRequests'), (snap) => {
+      const items: ChefContactRequest[] = [];
+      snap.forEach(doc => items.push(doc.data() as ChefContactRequest));
+      if (items.length > 0) {
+        setContactRequests(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen request cache load");
+    });
+
+    const unsubOnboardings = onSnapshot(collection(db, 'chefOnboardings'), (snap) => {
+      const items: ChefOnboarding[] = [];
+      snap.forEach(doc => items.push(doc.data() as ChefOnboarding));
+      if (items.length > 0) {
+        setChefOnboardings(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen onboarding cache load");
+    });
+
+    const unsubContactsSchedules = onSnapshot(collection(db, 'contactSchedules'), (snap) => {
+      const items: ContactSchedule[] = [];
+      snap.forEach(doc => items.push(doc.data() as ContactSchedule));
+      if (items.length > 0) {
+        setContacts(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen schedule cache load");
+    });
+
+    const unsubNotifications = onSnapshot(collection(db, 'notifications'), (snap) => {
+      const items: SystemNotification[] = [];
+      snap.forEach(doc => items.push(doc.data() as SystemNotification));
+      if (items.length > 0) {
+        setNotifications(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen notification cache load");
+    });
+
+    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
+      const items: UserIdentity[] = [];
+      snap.forEach(doc => items.push(doc.data() as UserIdentity));
+      if (items.length > 0) {
+        setRegisteredUsers(items);
+      }
+    }, (err) => {
+      console.warn("Offscreen user profiles cache load");
+    });
+
+    return () => {
+      unsubSuites();
+      unsubReviews();
+      unsubBookings();
+      unsubContactRequests();
+      unsubOnboardings();
+      unsubContactsSchedules();
+      unsubNotifications();
+      unsubUsers();
+    };
+  }, []);
+
+  // Sync role configuration on user alterations
+  useEffect(() => {
     setCurrentRole(currentUser.role);
   }, [currentUser]);
 
-  // Auth Functions
   const setRole = (role: UserRole) => {
-    // Switch to first matching role account or a mock workspace profile
     const existing = registeredUsers.find(u => u.role === role);
     if (existing) {
       setCurrentUser(existing);
     } else {
-      // Setup dynamic fallback profile
-      const rawUser = registeredUsers.find(u => u.email === currentUser.email);
-      if (rawUser && rawUser.role === role) {
-        setCurrentUser(rawUser);
-      } else {
-        // Fallback placeholder
-        setCurrentUser({
-          email: role === 'admin' ? 'admin.chief@sweetstay.com' : role === 'owner' ? 'sweet.owner@sweetstay.com' : 'guest.tester@sweetstay.com',
-          name: role === 'admin' ? 'Chief Admin Agent' : role === 'owner' ? 'Home Sweet Chef' : 'Guest Tester',
-          role,
-          avatar: role === 'owner' ? 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&q=80&w=120' : 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&q=80&w=120',
-          walletBalance: 500
-        });
-      }
+      const fallback = DEFAULT_ACCOUNTS.find(u => u.role === role) || DEFAULT_ACCOUNTS[0];
+      setCurrentUser(fallback);
     }
   };
 
-  const registerUser = (user: Omit<UserIdentity, 'walletBalance'>): { success: boolean; requiresVerification: boolean; msg: string } => {
+  const registerUser = (user: Omit<UserIdentity, 'walletBalance'>) => {
     const exists = registeredUsers.some(u => u.email.toLowerCase() === user.email.toLowerCase() && u.role === user.role);
     if (exists) {
-      return { success: false, requiresVerification: false, msg: 'This email address is already registered on this specific workspace role.' };
+      return { success: false, requiresVerification: false, msg: 'Email is already registered on this role.' };
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-
     const newUser: UserIdentity = {
       ...user,
       walletBalance: user.role === 'guest' ? 1000 : 0,
@@ -279,69 +506,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isEmailVerified: false,
       verificationCode: code
     };
-    setRegisteredUsers(prev => [...prev, newUser]);
 
-    // Dispatch system notification with code for sandbox visibility
-    const newNotif: SystemNotification = {
+    const id = user.email.replace(/[@.]/g, '_') + '_' + user.role;
+    setRegisteredUsers(prev => [...prev, newUser]);
+    setDoc(doc(db, 'users', id), newUser).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+    });
+
+    // Code Notification
+    const verificationNotif: SystemNotification = {
       id: 'verify-' + Date.now(),
       recipientEmail: user.email,
-      title: '🔐 Email Verification Code',
-      message: `Your Sweets & Snacks email verification code is: ${code}. Enter this code to verify your profile.`,
+      title: '🔐 Verification Code',
+      message: `Your Sweets & Snacks verification code is: ${code}. Enter this to activate your profile.`,
       date: new Date().toISOString(),
       read: false,
       type: 'system'
     };
-    setNotifications(prev => [newNotif, ...prev]);
+    setNotifications(prev => [verificationNotif, ...prev]);
+    setDoc(doc(db, 'notifications', verificationNotif.id), verificationNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${verificationNotif.id}`);
+    });
 
     return {
       success: true,
       requiresVerification: true,
-      msg: `Account registered successfully! A 6-digit verification code has been generated. Use code ${code} to verify.`
+      msg: `Registered! A verification code has been generated. Code is ${code}.`
     };
   };
 
-  const loginUser = (email: string, role: UserRole, password?: string): { success: boolean; requiresVerification?: boolean; msg: string } => {
+  const loginUser = (email: string, role: UserRole, password?: string) => {
     const match = registeredUsers.find(u => u.email.toLowerCase() === email.toLowerCase() && u.role === role);
     if (match) {
-      // Check password matching
       if (match.password && match.password !== password) {
-        return { success: false, msg: 'Account credential mismatch. The password you entered is incorrect.' };
+        return { success: false, msg: 'Incorrect password.' };
       }
 
-      // Check email verification status
       if (match.isEmailVerified === false) {
-        let code = match.verificationCode;
-        if (!code) {
-          code = Math.floor(100000 + Math.random() * 900000).toString();
-          setRegisteredUsers(prev => prev.map(u => u.email.toLowerCase() === email.toLowerCase() && u.role === role ? { ...u, verificationCode: code } : u));
-        }
-
+        const code = match.verificationCode || Math.floor(100000 + Math.random() * 900000).toString();
         const verifyNotif: SystemNotification = {
           id: 'verify-' + Date.now(),
           recipientEmail: email,
-          title: '🔐 Email Verification Code Required',
+          title: '🔐 Verification Code Required',
           message: `Your account is not verified yet. Your verification code is: ${code}.`,
           date: new Date().toISOString(),
           read: false,
           type: 'system'
         };
         setNotifications(prev => [verifyNotif, ...prev]);
+        setDoc(doc(db, 'notifications', verifyNotif.id), verifyNotif).catch(err => {
+          handleFirestoreError(err, OperationType.WRITE, `notifications/${verifyNotif.id}`);
+        });
 
         return {
           success: false,
           requiresVerification: true,
-          msg: `Your email is not verified yet. Verification code regenerated! Use: ${code}`
+          msg: `Account not verified! Code regenerated: ${code}`
         };
       }
 
       setCurrentUser(match);
-      return { success: true, msg: `Welcome back, ${match.name}! Login successful.` };
+      return { success: true, msg: `Welcome back, ${match.name}!` };
     }
 
-    // Default accounts don't exist under this email/role, so let's allow registration instead of auto provisioning to keep it realistic
     return {
       success: false,
-      msg: 'This email account is not registered under this role. Please register a new sweet kitchen identity first!'
+      msg: 'This email account is not registered. Please register a new sweet kitchen identity first!'
     };
   };
 
@@ -350,7 +580,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(guestUser);
   };
 
-  const verifyEmailCode = (email: string, role: UserRole, code: string): { success: boolean; msg: string } => {
+  const verifyEmailCode = (email: string, role: UserRole, code: string) => {
     const userIndex = registeredUsers.findIndex(u => u.email.toLowerCase() === email.toLowerCase() && u.role === role);
     if (userIndex === -1) {
       return { success: false, msg: 'Account not found.' };
@@ -362,53 +592,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isEmailVerified: true,
         verificationCode: undefined
       };
+
       setRegisteredUsers(prev => prev.map((u, i) => i === userIndex ? updatedUser : u));
       setCurrentUser(updatedUser);
+
+      const id = email.replace(/[@.]/g, '_') + '_' + role;
+      setDoc(doc(db, 'users', id), updatedUser).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+      });
 
       const welcomeNotif: SystemNotification = {
         id: 'welcome-' + Date.now(),
         recipientEmail: email,
         title: '🎉 Email Verified Successfully!',
-        message: `Welcome, ${targetUser.name}! Your account is verified. You can now place orders or request catering, direct with chefs.`,
+        message: `Welcome, ${targetUser.name}! Your account is verified. You can now shop sweets directly with chefs.`,
         date: new Date().toISOString(),
         read: false,
         type: 'system'
       };
       setNotifications(prev => [welcomeNotif, ...prev]);
+      setDoc(doc(db, 'notifications', welcomeNotif.id), welcomeNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${welcomeNotif.id}`);
+      });
 
-      return { success: true, msg: 'Email verification successful! Welcome.' };
+      return { success: true, msg: 'Email verification successful!' };
     }
-    return { success: false, msg: 'Mismatch code. Use 123456 or look up the code in notifications drawer 🔔.' };
+    return { success: false, msg: 'Incorrect code. (Use 123456 as standard trigger/bypass).' };
   };
 
-  const sendPasswordReset = (email: string, role: UserRole): { success: boolean; code: string; msg: string } => {
+  const sendPasswordReset = (email: string, role: UserRole) => {
     const userIndex = registeredUsers.findIndex(u => u.email.toLowerCase() === email.toLowerCase() && u.role === role);
     if (userIndex === -1) {
-      return { success: false, code: '', msg: 'Email address not registered under this role.' };
+      return { success: false, code: '', msg: 'Email is not registered.' };
     }
 
     const resetToken = 'RESET-' + Math.floor(100000 + Math.random() * 900000).toString();
-    setRegisteredUsers(prev => prev.map((u, i) => i === userIndex ? { ...u, resetToken } : u));
+    const updated = { ...registeredUsers[userIndex], resetToken };
+    setRegisteredUsers(prev => prev.map((u, i) => i === userIndex ? updated : u));
+
+    const id = email.replace(/[@.]/g, '_') + '_' + role;
+    setDoc(doc(db, 'users', id), updated).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+    });
 
     const resetNotif: SystemNotification = {
       id: 'reset-' + Date.now(),
       recipientEmail: email,
-      title: '🔑 Password Reset Code Generated',
-      message: `A password reset code has been requested. Code is: ${resetToken}. Enter this code in the reset container.`,
+      title: '🔑 Password Reset Token',
+      message: `A password reset token was requested. Code is: ${resetToken}.`,
       date: new Date().toISOString(),
       read: false,
       type: 'system'
     };
     setNotifications(prev => [resetNotif, ...prev]);
+    setDoc(doc(db, 'notifications', resetNotif.id), resetNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${resetNotif.id}`);
+    });
 
     return {
       success: true,
       code: resetToken,
-      msg: `A reset code has been generated. Use code ${resetToken} to reset your password.`
+      msg: `Reset code generated! Code: ${resetToken}`
     };
   };
 
-  const resetPasswordWithToken = (email: string, role: UserRole, token: string, newPassword: string): { success: boolean; msg: string } => {
+  const resetPasswordWithToken = (email: string, role: UserRole, token: string, newPassword: string) => {
     const userIndex = registeredUsers.findIndex(u => u.email.toLowerCase() === email.toLowerCase() && u.role === role);
     if (userIndex === -1) {
       return { success: false, msg: 'Account not found.' };
@@ -422,12 +670,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isEmailVerified: true
       };
       setRegisteredUsers(prev => prev.map((u, i) => i === userIndex ? updatedUser : u));
-      return { success: true, msg: 'Password reset successfully! You can now log in.' };
+
+      const id = email.replace(/[@.]/g, '_') + '_' + role;
+      setDoc(doc(db, 'users', id), updatedUser).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+      });
+
+      return { success: true, msg: 'Password reset successfully!' };
     }
-    return { success: false, msg: 'Invalid or incorrect reset token. Check notification drawer 🔔.' };
+    return { success: false, msg: 'Invalid or incorrect reset token.' };
   };
 
-  // Favoriting
+  // Favorites
   const favorites = currentUser.favorites || [];
   const toggleFavorite = (sweetId: string) => {
     const isFav = favorites.includes(sweetId);
@@ -439,35 +693,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     setRegisteredUsers(prev => prev.map(u => {
-      if (u.email === currentUser.email && u.role === currentUser.role) {
+      if (u.email.toLowerCase() === currentUser.email.toLowerCase() && u.role === currentUser.role) {
         return { ...u, favorites: updated };
       }
       return u;
     }));
 
-    setCurrentUser(prev => ({ ...prev, favorites: updated }));
+    const nextUser = { ...currentUser, favorites: updated };
+    setCurrentUser(nextUser);
+
+    const id = currentUser.email.replace(/[@.]/g, '_') + '_' + currentUser.role;
+    setDoc(doc(db, 'users', id), nextUser).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+    });
   };
 
   const isFavorite = (sweetId: string) => {
     return favorites.includes(sweetId);
   };
 
-  // Wallet updates
+  // Wallet
   const updateWallet = (amount: number) => {
+    const nextUser = {
+      ...currentUser,
+      walletBalance: (currentUser.walletBalance || 0) + amount
+    };
+    setCurrentUser(nextUser);
+
     setRegisteredUsers(prev => prev.map(u => {
-      if (u.email === currentUser.email && u.role === currentUser.role) {
-        const balance = (u.walletBalance || 0) + amount;
-        return { ...u, walletBalance: balance };
+      if (u.email.toLowerCase() === currentUser.email.toLowerCase() && u.role === currentUser.role) {
+        return nextUser;
       }
       return u;
     }));
-    setCurrentUser(prev => ({
-      ...prev,
-      walletBalance: (prev.walletBalance || 0) + amount
-    }));
+
+    const id = currentUser.email.replace(/[@.]/g, '_') + '_' + currentUser.role;
+    setDoc(doc(db, 'users', id), nextUser).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+    });
   };
 
-  // Add Homemade Sweet (Owner Role)
+  // Culinary creations listing
   const addSuite = (newSweetData: Omit<Suite, 'id' | 'rating' | 'reviewsCount' | 'status' | 'ownerEmail'>) => {
     const id = `sweet-item-${Date.now()}`;
     const suite: Suite = {
@@ -475,13 +741,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id,
       rating: 5.0,
       reviewsCount: 0,
-      status: 'pending', // Pending state for Administrator approval
+      status: 'pending',
       ownerEmail: currentUser.email
     };
 
     setSuites(prev => [suite, ...prev]);
+    setDoc(doc(db, 'suites', id), suite).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `suites/${id}`);
+    });
 
-    // System Notification to Admins
     const newNotif: SystemNotification = {
       id: `notif-p-${Date.now()}`,
       recipientEmail: 'all-admins',
@@ -492,28 +760,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'property'
     };
     setNotifications(prev => [newNotif, ...prev]);
+    setDoc(doc(db, 'notifications', newNotif.id), newNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${newNotif.id}`);
+    });
   };
 
   const deleteSuite = (suiteId: string) => {
     setSuites(prev => prev.filter(s => s.id !== suiteId));
+    deleteDoc(doc(db, 'suites', suiteId)).catch(err => {
+      handleFirestoreError(err, OperationType.DELETE, `suites/${suiteId}`);
+    });
   };
 
-  // Approve sweet (Admin Role)
   const approveSuite = (suiteId: string) => {
     let suiteTitle = '';
     let ownerEmail = '';
-    setSuites(prev =>
-      prev.map(s => {
-        if (s.id === suiteId) {
-          suiteTitle = s.title;
-          ownerEmail = s.ownerEmail;
-          return { ...s, status: 'approved' };
-        }
-        return s;
-      })
-    );
+    const updated = suites.map(s => {
+      if (s.id === suiteId) {
+        suiteTitle = s.title;
+        ownerEmail = s.ownerEmail;
+        return { ...s, status: 'approved' as const };
+      }
+      return s;
+    });
 
-    // Notify Chef
+    setSuites(updated);
+    const target = updated.find(s => s.id === suiteId);
+    if (target) {
+      setDoc(doc(db, 'suites', suiteId), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `suites/${suiteId}`);
+      });
+    }
+
     const newNotif: SystemNotification = {
       id: `notif-app-${Date.now()}`,
       recipientEmail: ownerEmail,
@@ -524,24 +802,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'property'
     };
     setNotifications(prev => [newNotif, ...prev]);
+    setDoc(doc(db, 'notifications', newNotif.id), newNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${newNotif.id}`);
+    });
   };
 
-  // Reject sweet (Admin Role)
   const rejectSuite = (suiteId: string) => {
     let suiteTitle = '';
     let ownerEmail = '';
-    setSuites(prev =>
-      prev.map(s => {
-        if (s.id === suiteId) {
-          suiteTitle = s.title;
-          ownerEmail = s.ownerEmail;
-          return { ...s, status: 'rejected' };
-        }
-        return s;
-      })
-    );
+    const updated = suites.map(s => {
+      if (s.id === suiteId) {
+        suiteTitle = s.title;
+        ownerEmail = s.ownerEmail;
+        return { ...s, status: 'rejected' as const };
+      }
+      return s;
+    });
 
-    // Notify Chef
+    setSuites(updated);
+    const target = updated.find(s => s.id === suiteId);
+    if (target) {
+      setDoc(doc(db, 'suites', suiteId), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `suites/${suiteId}`);
+      });
+    }
+
     const newNotif: SystemNotification = {
       id: `notif-rej-${Date.now()}`,
       recipientEmail: ownerEmail,
@@ -552,9 +837,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'property'
     };
     setNotifications(prev => [newNotif, ...prev]);
+    setDoc(doc(db, 'notifications', newNotif.id), newNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${newNotif.id}`);
+    });
   };
 
-  // Add Sweet purchase (Booking / Order)
+  // Orders / Bookings
   const addBooking = (newBookingData: Omit<Booking, 'id' | 'guestName' | 'guestEmail' | 'status' | 'paymentStatus' | 'createdAt'>) => {
     const id = `order-${Date.now()}`;
     const targetSweet = suites.find(s => s.id === newBookingData.suiteId);
@@ -564,17 +852,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id,
       guestName: currentUser.name,
       guestEmail: currentUser.email,
-      status: 'pending', // Starts as pending for Chef approval
+      status: 'pending',
       paymentStatus: 'paid',
       createdAt: new Date().toISOString()
     };
 
-    // Charge customer
     updateWallet(-newBookingData.totalAmount);
-
     setBookings(prev => [booking, ...prev]);
+    setDoc(doc(db, 'bookings', id), booking).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `bookings/${id}`);
+    });
 
-    // Send notifications to Chef
     if (targetSweet) {
       const chefNotif: SystemNotification = {
         id: `notif-or-${Date.now()}`,
@@ -597,6 +885,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setNotifications(prev => [chefNotif, selfNotif, ...prev]);
+      setDoc(doc(db, 'notifications', chefNotif.id), chefNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${chefNotif.id}`);
+      });
+      setDoc(doc(db, 'notifications', selfNotif.id), selfNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${selfNotif.id}`);
+      });
     }
 
     return booking;
@@ -608,34 +902,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let guestEmail = '';
     let ownerEmail = '';
 
-    setBookings(prev =>
-      prev.map(b => {
-        if (b.id === bookingId) {
-          refundAmount = b.totalAmount;
-          sweetTitle = b.suiteTitle;
-          guestEmail = b.guestEmail;
-          const matchedSweet = suites.find(s => s.id === b.suiteId);
-          if (matchedSweet) ownerEmail = matchedSweet.ownerEmail;
-          return { ...b, status: 'cancelled' as const };
-        }
-        return b;
-      })
-    );
+    const updated = bookings.map(b => {
+      if (b.id === bookingId) {
+        refundAmount = b.totalAmount;
+        sweetTitle = b.suiteTitle;
+        guestEmail = b.guestEmail;
+        const matchedSweet = suites.find(s => s.id === b.suiteId);
+        if (matchedSweet) ownerEmail = matchedSweet.ownerEmail;
+        return { ...b, status: 'cancelled' as const };
+      }
+      return b;
+    });
 
-    // Refund Wallet
+    setBookings(updated);
+    const target = updated.find(b => b.id === bookingId);
+    if (target) {
+      setDoc(doc(db, 'bookings', bookingId), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `bookings/${bookingId}`);
+      });
+    }
+
     if (guestEmail === currentUser.email && currentUser.role === 'guest') {
       updateWallet(refundAmount);
     } else {
-      // Refund to other guest account
       setRegisteredUsers(prev => prev.map(u => {
         if (u.email === guestEmail && u.role === 'guest') {
-          return { ...u, walletBalance: (u.walletBalance || 0) + refundAmount };
+          const nextBal = (u.walletBalance || 0) + refundAmount;
+          const nextU = { ...u, walletBalance: nextBal };
+          const userKey = u.email.replace(/[@.]/g, '_') + '_' + u.role;
+          setDoc(doc(db, 'users', userKey), nextU).catch(err => {
+            handleFirestoreError(err, OperationType.WRITE, `users/${userKey}`);
+          });
+          return nextU;
         }
         return u;
       }));
     }
 
-    // Notifications
     const guestNotif: SystemNotification = {
       id: `notif-can-${Date.now()}`,
       recipientEmail: guestEmail,
@@ -657,35 +960,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setNotifications(prev => [guestNotif, chefNotif, ...prev]);
+    setDoc(doc(db, 'notifications', guestNotif.id), guestNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${guestNotif.id}`);
+    });
+    setDoc(doc(db, 'notifications', chefNotif.id), chefNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${chefNotif.id}`);
+    });
   };
 
-  // Change Order status (Chef Panel approved / completed)
   const updateBookingStatus = (bookingId: string, status: 'approved' | 'cancelled' | 'completed') => {
     let total = 0;
     let sweetTitle = '';
     let guestEmail = '';
     let chefEmail = '';
 
-    setBookings(prev =>
-      prev.map(b => {
-        if (b.id === bookingId) {
-          total = b.totalAmount;
-          sweetTitle = b.suiteTitle;
-          guestEmail = b.guestEmail;
-          const matchedSweet = suites.find(s => s.id === b.suiteId);
-          if (matchedSweet) chefEmail = matchedSweet.ownerEmail;
-          return { ...b, status };
-        }
-        return b;
-      })
-    );
+    const updated = bookings.map(b => {
+      if (b.id === bookingId) {
+        total = b.totalAmount;
+        sweetTitle = b.suiteTitle;
+        guestEmail = b.guestEmail;
+        const matchedSweet = suites.find(s => s.id === b.suiteId);
+        if (matchedSweet) chefEmail = matchedSweet.ownerEmail;
+        return { ...b, status };
+      }
+      return b;
+    });
+
+    setBookings(updated);
+    const target = updated.find(b => b.id === bookingId);
+    if (target) {
+      setDoc(doc(db, 'bookings', bookingId), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `bookings/${bookingId}`);
+      });
+    }
 
     if (status === 'approved') {
-      // Disburse earnings to chef
       if (chefEmail) {
         setRegisteredUsers(prev => prev.map(u => {
           if (u.email === chefEmail && u.role === 'owner') {
-            return { ...u, walletBalance: (u.walletBalance || 0) + total };
+            const nextBal = (u.walletBalance || 0) + total;
+            const nextU = { ...u, walletBalance: nextBal };
+            const userKey = u.email.replace(/[@.]/g, '_') + '_' + u.role;
+            setDoc(doc(db, 'users', userKey), nextU).catch(err => {
+              handleFirestoreError(err, OperationType.WRITE, `users/${userKey}`);
+            });
+            return nextU;
           }
           return u;
         }));
@@ -694,7 +1013,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // Notify customer
       const clientNotif: SystemNotification = {
         id: `notif-obs-${Date.now()}`,
         recipientEmail: guestEmail,
@@ -705,6 +1023,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         type: 'booking'
       };
       setNotifications(prev => [clientNotif, ...prev]);
+      setDoc(doc(db, 'notifications', clientNotif.id), clientNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${clientNotif.id}`);
+      });
     } else if (status === 'completed') {
       const clientNotif: SystemNotification = {
         id: `notif-obs-${Date.now()}`,
@@ -716,13 +1037,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         type: 'booking'
       };
       setNotifications(prev => [clientNotif, ...prev]);
+      setDoc(doc(db, 'notifications', clientNotif.id), clientNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${clientNotif.id}`);
+      });
     } else if (status === 'cancelled') {
-      // cancel & refund
       cancelBooking(bookingId);
     }
   };
 
-  // Add Review
   const addReview = (reviewData: Omit<Review, 'id' | 'date' | 'avatar' | 'userName'>) => {
     const id = `rev-${Date.now()}`;
     const newRev: Review = {
@@ -734,26 +1056,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setReviews(prev => [newRev, ...prev]);
+    setDoc(doc(db, 'reviews', id), newRev).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `reviews/${id}`);
+    });
 
-    // Recalculate Rating
-    setSuites(prev =>
-      prev.map(suite => {
-        if (suite.id === reviewData.suiteId) {
-          const suiteReviews = [...reviews.filter(r => r.suiteId === suite.id), newRev];
-          const averageRating = parseFloat(
-            (suiteReviews.reduce((sum, r) => sum + r.rating, 0) / suiteReviews.length).toFixed(1)
-          );
-          return {
-            ...suite,
-            rating: averageRating,
-            reviewsCount: suiteReviews.length
-          };
-        }
-        return suite;
-      })
-    );
+    const nextSuites = suites.map(suite => {
+      if (suite.id === reviewData.suiteId) {
+        const suiteReviews = [...reviews.filter(r => r.suiteId === suite.id), newRev];
+        const averageRating = parseFloat(
+          (suiteReviews.reduce((sum, r) => sum + r.rating, 0) / suiteReviews.length).toFixed(1)
+        );
+        const updatedSuite = {
+          ...suite,
+          rating: averageRating,
+          reviewsCount: suiteReviews.length
+        };
+        // sync back
+        setDoc(doc(db, 'suites', suite.id), updatedSuite).catch(err => {
+          handleFirestoreError(err, OperationType.WRITE, `suites/${suite.id}`);
+        });
+        return updatedSuite;
+      }
+      return suite;
+    });
+    setSuites(nextSuites);
 
-    // Notify Chef
     const targetSweet = suites.find(s => s.id === reviewData.suiteId);
     if (targetSweet) {
       const ownerNotif: SystemNotification = {
@@ -766,10 +1093,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         type: 'review'
       };
       setNotifications(prev => [ownerNotif, ...prev]);
+      setDoc(doc(db, 'notifications', ownerNotif.id), ownerNotif).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${ownerNotif.id}`);
+      });
     }
   };
 
-  // Add Help Contact form schedule
   const addContactSchedule = (contactData: Omit<ContactSchedule, 'id' | 'status' | 'createdAt'>) => {
     const id = `cnt-${Date.now()}`;
     const newContact: ContactSchedule = {
@@ -780,8 +1109,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setContacts(prev => [newContact, ...prev]);
+    setDoc(doc(db, 'contactSchedules', id), newContact).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `contactSchedules/${id}`);
+    });
 
-    // Send notifications to Admin and Self
     const adminNotif: SystemNotification = {
       id: `notif-con-${Date.now()}`,
       recipientEmail: 'all-admins',
@@ -803,9 +1134,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setNotifications(prev => [adminNotif, selfNotif, ...prev]);
+    setDoc(doc(db, 'notifications', adminNotif.id), adminNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${adminNotif.id}`);
+    });
+    setDoc(doc(db, 'notifications', selfNotif.id), selfNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${selfNotif.id}`);
+    });
   };
 
-  // Contact requests directly to Chefs (e.g. "Contact Owner")
   const addContactRequest = (req: Omit<ChefContactRequest, 'id' | 'createdAt' | 'status'>) => {
     const id = `req-${Date.now()}`;
     const newReq: ChefContactRequest = {
@@ -816,39 +1152,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setContactRequests(prev => [newReq, ...prev]);
+    setDoc(doc(db, 'contactRequests', id), newReq).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `contactRequests/${id}`);
+    });
 
-    // Notify Chef
     const chefNotif: SystemNotification = {
       id: `notif-creq-${Date.now()}`,
       recipientEmail: req.chefEmail,
       title: 'Direct Message from Customer! 📬',
-      message: `${req.buyerName} is asking about "${req.sweetTitle}". Reply to their WhatsApp/email inside your studio dashboard.`,
+      message: `${req.buyerName} is asking about "${req.sweetTitle}". Reply inside your studio dashboard.`,
       date: new Date().toISOString(),
       read: false,
       type: 'contact'
     };
     setNotifications(prev => [chefNotif, ...prev]);
+    setDoc(doc(db, 'notifications', chefNotif.id), chefNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${chefNotif.id}`);
+    });
   };
 
   const replyToContactRequest = (reqId: string, messageText: string, channel: 'whatsapp' | 'mail') => {
     let customerEmail = '';
     let sweetTitle = '';
-    setContactRequests(prev =>
-      prev.map(r => {
-        if (r.id === reqId) {
-          customerEmail = r.buyerEmail;
-          sweetTitle = r.sweetTitle;
-          return {
-            ...r,
-            status: channel === 'whatsapp' ? 'replied_whatsapp' : 'replied_mail',
-            replyMessage: messageText
-          };
-        }
-        return r;
-      })
-    );
+    const updated = contactRequests.map(r => {
+      if (r.id === reqId) {
+        customerEmail = r.buyerEmail;
+        sweetTitle = r.sweetTitle;
+        return {
+          ...r,
+          status: channel === 'whatsapp' ? 'replied_whatsapp' as const : 'replied_mail' as const,
+          replyMessage: messageText
+        };
+      }
+      return r;
+    });
 
-    // Notify Customer about reply
+    setContactRequests(updated);
+    const target = updated.find(r => r.id === reqId);
+    if (target) {
+      setDoc(doc(db, 'contactRequests', reqId), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `contactRequests/${reqId}`);
+      });
+    }
+
     const clientNotif: SystemNotification = {
       id: `notif-crply-${Date.now()}`,
       recipientEmail: customerEmail,
@@ -859,14 +1205,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'contact'
     };
     setNotifications(prev => [clientNotif, ...prev]);
+    setDoc(doc(db, 'notifications', clientNotif.id), clientNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${clientNotif.id}`);
+    });
   };
 
-  // Chef onboarding & compliance
   const upsertChefOnboarding = (onboarding: Omit<ChefOnboarding, 'verified'>) => {
     const exists = chefOnboardings.some(c => c.email.toLowerCase() === onboarding.email.toLowerCase());
+    const matched = chefOnboardings.find(c => c.email.toLowerCase() === onboarding.email.toLowerCase());
+    const verified = exists ? (matched?.verified || false) : false;
     const updatedOnboarding: ChefOnboarding = {
       ...onboarding,
-      verified: exists ? (chefOnboardings.find(c => c.email.toLowerCase() === onboarding.email.toLowerCase())?.verified || false) : false
+      verified
     };
 
     if (exists) {
@@ -875,7 +1225,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setChefOnboardings(prev => [...prev, updatedOnboarding]);
     }
 
-    // Trigger Admin Notification for Verification checks
+    const id = onboarding.email.replace(/[@.]/g, '_');
+    setDoc(doc(db, 'chefOnboardings', id), updatedOnboarding).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `chefOnboardings/${id}`);
+    });
+
     const adminNotif: SystemNotification = {
       id: `notif-onb-${Date.now()}`,
       recipientEmail: 'all-admins',
@@ -886,44 +1240,74 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'system'
     };
     setNotifications(prev => [adminNotif, ...prev]);
+    setDoc(doc(db, 'notifications', adminNotif.id), adminNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${adminNotif.id}`);
+    });
   };
 
   const verifyChef = (email: string) => {
-    setChefOnboardings(prev =>
-      prev.map(c => (c.email.toLowerCase() === email.toLowerCase() ? { ...c, verified: true } : c))
-    );
+    const updated = chefOnboardings.map(c => (c.email.toLowerCase() === email.toLowerCase() ? { ...c, verified: true } : c));
+    setChefOnboardings(updated);
 
-    // Notify Chef
+    const id = email.replace(/[@.]/g, '_');
+    const target = updated.find(c => c.email.toLowerCase() === email.toLowerCase());
+    if (target) {
+      setDoc(doc(db, 'chefOnboardings', id), target).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `chefOnboardings/${id}`);
+      });
+    }
+
     const chefNotif: SystemNotification = {
       id: `notif-vry-${Date.now()}`,
       recipientEmail: email,
       title: 'Kitchen Verified! 🛡️',
-      message: 'Your home-made kitchen certificate and license are verified. You can now post new cookie-cutter sweets!',
+      message: 'Your home-made kitchen certificate and license are verified. You can now post original sweets!',
       date: new Date().toISOString(),
       read: false,
       type: 'system'
     };
     setNotifications(prev => [chefNotif, ...prev]);
+    setDoc(doc(db, 'notifications', chefNotif.id), chefNotif).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `notifications/${chefNotif.id}`);
+    });
   };
 
-  // Notification actions
   const markNotificationRead = (notifId: string) => {
     setNotifications(prev =>
       prev.map(n => (n.id === notifId ? { ...n, read: true } : n))
     );
+    const target = notifications.find(n => n.id === notifId);
+    if (target) {
+      setDoc(doc(db, 'notifications', notifId), { ...target, read: true }).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `notifications/${notifId}`);
+      });
+    }
   };
 
   const markAllNotificationsRead = () => {
-    setNotifications(prev =>
-      prev.map(n => {
-        const isRecipient =
-          (currentRole === 'admin' && n.recipientEmail === 'all-admins') ||
-          (currentRole === 'owner' && n.recipientEmail === currentUser.email) ||
-          (currentRole === 'guest' && n.recipientEmail === currentUser.email);
+    const readList = notifications.map(n => {
+      const isRecipient =
+        (currentRole === 'admin' && n.recipientEmail === 'all-admins') ||
+        (currentRole === 'owner' && n.recipientEmail === currentUser.email) ||
+        (currentRole === 'guest' && n.recipientEmail === currentUser.email);
 
-        return isRecipient ? { ...n, read: true } : n;
-      })
-    );
+      return isRecipient ? { ...n, read: true } : n;
+    });
+    setNotifications(readList);
+    
+    // sync those matching to read
+    const batch = writeBatch(db);
+    readList.forEach(n => {
+      const isRecipient =
+        (currentRole === 'admin' && n.recipientEmail === 'all-admins') ||
+        (currentRole === 'owner' && n.recipientEmail === currentUser.email) ||
+        (currentRole === 'guest' && n.recipientEmail === currentUser.email);
+
+      if (isRecipient) {
+        batch.set(doc(collection(db, 'notifications'), n.id), n);
+      }
+    });
+    batch.commit().catch(err => console.warn(err));
   };
 
   const clearAllNotifications = () => {
@@ -948,23 +1332,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateCurrentUserProfile = (profile: { name: string; phone?: string; address?: string }) => {
+    const updated = {
+      ...currentUser,
+      name: profile.name,
+      phone: profile.phone ?? currentUser.phone,
+      address: profile.address ?? currentUser.address
+    };
+    setCurrentUser(updated);
+
     setRegisteredUsers(prev => prev.map(u => {
       if (u.email.toLowerCase() === currentUser.email.toLowerCase() && u.role === currentUser.role) {
-        return {
-          ...u,
-          name: profile.name,
-          phone: profile.phone ?? u.phone,
-          address: profile.address ?? u.address
-        };
+        return updated;
       }
       return u;
     }));
-    setCurrentUser(prev => ({
-      ...prev,
-      name: profile.name,
-      phone: profile.phone ?? prev.phone,
-      address: profile.address ?? prev.address
-    }));
+
+    const id = currentUser.email.replace(/[@.]/g, '_') + '_' + currentUser.role;
+    setDoc(doc(db, 'users', id), updated).catch(err => {
+      handleFirestoreError(err, OperationType.WRITE, `users/${id}`);
+    });
   };
 
   return (
@@ -997,7 +1383,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         clearAllNotifications,
         updateWallet,
         
-        // Auth / account registry
         registeredUsers,
         registerUser,
         loginUser,
@@ -1006,17 +1391,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendPasswordReset,
         resetPasswordWithToken,
         
-        // Favorites
         favorites,
         toggleFavorite,
         isFavorite,
         
-        // Chef Direct chat/contact requests
         contactRequests,
         addContactRequest,
         replyToContactRequest,
         
-        // Onboardings
         chefOnboardings,
         upsertChefOnboarding,
         verifyChef
