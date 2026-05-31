@@ -1,0 +1,6 @@
+{
+  "name": "Sweet Stay Sweets & Snacks",
+  "description": "An exquisite artisan marketplace for homemade sweets and crunchy snacks. Order delicacies online, contact domestic chefs via WhatsApp, persist order histories, and manage compliance on an executive dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
